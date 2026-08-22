@@ -1,0 +1,1395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MASHED — A Slugcat Boss Fight</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #05070a;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; font-family: 'Georgia', serif; color: #cfd8e3;
+    overflow: hidden;
+  }
+  #gameWrap { position: relative; }
+  canvas { display: block; border-radius: 6px; box-shadow: 0 0 60px rgba(80,120,160,0.15); }
+  #hud {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none; color: #dbe4ee;
+  }
+  .overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    background: rgba(4,6,9,0.86); pointer-events: all; gap: 1rem;
+  }
+  .hidden { display: none !important; }
+  .title-word { font-size: 3.2rem; letter-spacing: 0.15em; color: #a9c4d8; text-shadow: 0 0 30px rgba(120,170,210,0.5); }
+  .subtitle { font-size: 1rem; color: #7c8ea3; letter-spacing: 0.08em; max-width: 480px; line-height: 1.6; }
+  button.gamebtn {
+    font-family: inherit; font-size: 1rem; letter-spacing: 0.08em;
+    background: rgba(120,170,210,0.12); border: 1px solid rgba(120,170,210,0.5);
+    color: #cfe3f2; padding: 0.75rem 2rem; border-radius: 4px; cursor: pointer;
+    transition: all 0.2s ease;
+  }
+  button.gamebtn:hover { background: rgba(120,170,210,0.25); transform: translateY(-1px); }
+  .attempts-tag { font-size: 0.8rem; color: #5d6e82; letter-spacing: 0.05em; margin-top: 0.5rem; }
+  .controls-hint { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); font-size: 0.7rem; color: #4a5768; letter-spacing: 0.04em; text-align: center; line-height: 1.6; }
+</style>
+</head>
+<body>
+
+<div id="gameWrap">
+  <canvas id="game" width="900" height="520"></canvas>
+  <div id="hud">
+    <div id="titleScreen" class="overlay">
+      <div class="title-word">MASHED</div>
+      <div class="subtitle">A slugcat descends into the ruined depths, chasing one last, impossible thing: mashed potatoes. A knight guards the way — and calls on echoes of himself when wounded.</div>
+      <button class="gamebtn" id="startBtn">Descend</button>
+      <div class="attempts-tag" id="attemptsTag">Attempts so far: 0</div>
+    </div>
+    <div id="loseScreen" class="overlay hidden">
+      <div class="title-word" style="font-size:2.2rem; color:#c98a8a;">THE DEPTHS CLAIM YOU</div>
+      <div class="subtitle" id="loseSubtitle">The knight was stronger this time.</div>
+      <button class="gamebtn" id="retryBtn">Try Again</button>
+    </div>
+    <div id="winScreen" class="overlay hidden">
+      <div class="title-word" style="font-size:2.2rem; color:#d8c48a;">MASHED POTATOES</div>
+      <div class="subtitle" id="winSubtitle">At last. The journey ends in something warm.</div>
+      <button class="gamebtn" id="mintBtn">Mint Victory On-Chain</button>
+      <button class="gamebtn" id="winRetryBtn" style="margin-top:0.4rem;">Descend Again</button>
+      <div class="attempts-tag" id="winAttemptsTag"></div>
+      <div class="attempts-tag" id="mintStatusTag"></div>
+    </div>
+  </div>
+  <div class="controls-hint">← → move · SPACE jump · S dash/dodge · HOLD LEFT-CLICK charge swing, release to attack · RIGHT-CLICK or W block/parry · Z use potion (3 max, heals 50%)</div>
+</div>
+
+<script>
+// ============================================================
+// MASHED — Slugcat vs. The Warden Knight
+// Stick-figure fighters with real weapon reach; fully canvas-drawn.
+// ============================================================
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const GROUND_Y = H - 90;
+
+const ATTEMPTS_KEY = 'mashed_boss_attempts';
+function getAttempts() { return parseInt(localStorage.getItem(ATTEMPTS_KEY) || '0', 10); }
+function bumpAttempts() {
+  const n = getAttempts() + 1;
+  localStorage.setItem(ATTEMPTS_KEY, String(n));
+  return n;
+}
+document.getElementById('attemptsTag').textContent = `Attempts so far: ${getAttempts()}`;
+
+let shakeAmount = 0;
+function addShake(amt) { shakeAmount = Math.max(shakeAmount, amt); }
+
+// ---------- Background ----------
+const bgLayers = [];
+function buildBackgroundLayers() {
+  const layerConfigs = [
+    { count: 5, color: '#080d13', speed: 0.08, yBase: H * 0.5, heightRange: [110, 220], pipe: true },
+    { count: 7, color: '#0c141c', speed: 0.18, yBase: H * 0.6, heightRange: [80, 170] },
+    { count: 9, color: '#111c26', speed: 0.32, yBase: H * 0.72, heightRange: [50, 120], pipe: true },
+    { count: 12, color: '#17242f', speed: 0.55, yBase: H * 0.84, heightRange: [25, 65] }
+  ];
+  layerConfigs.forEach(cfg => {
+    const shapes = [];
+    for (let i = 0; i < cfg.count; i++) {
+      shapes.push({
+        x: (W / cfg.count) * i + (Math.random() * 40 - 20),
+        w: 50 + Math.random() * 90,
+        h: cfg.heightRange[0] + Math.random() * (cfg.heightRange[1] - cfg.heightRange[0]),
+        isPipe: cfg.pipe && Math.random() > 0.5
+      });
+    }
+    bgLayers.push({ ...cfg, shapes });
+  });
+}
+buildBackgroundLayers();
+
+function drawBackground(t) {
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#04070b');
+  grad.addColorStop(0.45, '#080f16');
+  grad.addColorStop(0.75, '#0c161e');
+  grad.addColorStop(1, '#141f28');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.globalAlpha = 0.05 + 0.02 * Math.sin(t / 90);
+  const shaftGrad = ctx.createLinearGradient(W * 0.65, 0, W * 0.8, H);
+  shaftGrad.addColorStop(0, 'rgba(150,190,220,0.6)');
+  shaftGrad.addColorStop(1, 'rgba(150,190,220,0)');
+  ctx.fillStyle = shaftGrad;
+  ctx.beginPath();
+  ctx.moveTo(W * 0.6, 0); ctx.lineTo(W * 0.72, 0); ctx.lineTo(W * 0.85, H); ctx.lineTo(W * 0.7, H);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+
+  ctx.fillStyle = 'rgba(150,190,215,0.09)';
+  for (let i = 0; i < 26; i++) {
+    const mx = (i * 137 + t * 5) % (W + 40) - 20;
+    const my = (i * 71 + Math.sin(t/50 + i) * 8) % H;
+    ctx.beginPath();
+    ctx.arc(mx, my, 1.3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  bgLayers.forEach(layer => {
+    ctx.fillStyle = layer.color;
+    layer.shapes.forEach(s => {
+      const xOff = -(t * layer.speed) % (W + 200);
+      const baseX = s.x + xOff;
+      if (s.isPipe) {
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(baseX, layer.yBase - s.h, s.w * 0.4, s.h, 8) : ctx.rect(baseX, layer.yBase - s.h, s.w * 0.4, s.h);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(80,110,130,0.15)';
+        ctx.lineWidth = 1;
+        for (let ring = 1; ring < 4; ring++) {
+          ctx.beginPath();
+          ctx.moveTo(baseX, layer.yBase - s.h * (ring / 4));
+          ctx.lineTo(baseX + s.w * 0.4, layer.yBase - s.h * (ring / 4));
+          ctx.stroke();
+        }
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(baseX, H);
+        ctx.lineTo(baseX, layer.yBase - s.h * 0.4);
+        ctx.lineTo(baseX + s.w * 0.3, layer.yBase - s.h);
+        ctx.lineTo(baseX + s.w * 0.6, layer.yBase - s.h * 0.6);
+        ctx.lineTo(baseX + s.w, layer.yBase - s.h * 0.5);
+        ctx.lineTo(baseX + s.w, H);
+        ctx.closePath();
+        ctx.fill();
+      }
+    });
+  });
+
+  ctx.fillStyle = '#0a0f14';
+  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+  const groundGlow = ctx.createLinearGradient(0, GROUND_Y, 0, GROUND_Y + 12);
+  groundGlow.addColorStop(0, 'rgba(120,160,190,0.18)');
+  groundGlow.addColorStop(1, 'rgba(120,160,190,0)');
+  ctx.fillStyle = groundGlow;
+  ctx.fillRect(0, GROUND_Y, W, 12);
+
+  ctx.save();
+  ctx.globalAlpha = 0.06 + 0.03 * Math.sin(t / 70);
+  ctx.fillStyle = '#4a6478';
+  ctx.beginPath();
+  ctx.ellipse((t * 0.4) % (W + 300) - 150, GROUND_Y - 20, 260, 40, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// ---------- Player: slugcat fighter (articulated) ----------
+const player = {
+  x: 150, y: GROUND_Y, w: 40, h: 60,
+  vx: 0, vy: 0, targetVx: 0,
+  onGround: true,
+  hp: 100, maxHp: 100,
+  facing: 1,
+  dashCooldown: 0, isDashing: false, dashTimer: 0, invuln: 0,
+  attackCooldown: 0, attackTimer: 0, charging: false, chargeTime: 0, recoveryTimer: 0,
+  blocking: false, blockTimer: 0, guardRaise: 0,
+  potions: 3,
+  alive: true,
+  walkPhase: 0,
+  stamina: 100, staminaRegenTimer: 0
+};
+const PLAYER_ACCEL = 0.28; // lower = smoother/slower ramp-up
+
+const CHARGE_MAX = 30; // faster — full charge builds up quicker
+const PARRY_WINDOW = 10;
+const REACH = 68; // matches the fixed visual blade's actual reach
+const GUARD_RAISE_FRAMES = 7; // how long the reverse-swing into guard takes
+const GUARD_LOWER_FRAMES = 10; // how long the sword takes to drop back down
+const GUARD_REST_ANGLE = -0.5;
+const GUARD_ANGLE = -1.65; // near-vertical, high guard — visually distinct from the low resting angle
+
+// ---------- Stamina ----------
+// All tuning in one place — retune here, not in the logic below, if the
+// balance feels off. Costs are set so the STATED number of uses drains a
+// full bar from 100: 6 swings, 8 jumps, or 3 dashes.
+const STAMINA_MAX = 100;
+const STAMINA_ATTACK_COST = STAMINA_MAX / 6;   // ~16.7 per swing
+const STAMINA_JUMP_COST = STAMINA_MAX / 8;     // 12.5 per jump
+const STAMINA_DASH_COST = STAMINA_MAX / 3;     // ~33.3 per dash
+const STAMINA_REGEN_DELAY = 40;                // frames of no spending before regen kicks in
+const STAMINA_REGEN_RATE = STAMINA_MAX / 150;  // per frame once regen starts (~2.5s for a full bar)
+
+// Shared by drawing and hit detection so the visible blade and the actual
+// block hitbox are always the same sword in the same place.
+function currentGuardArmAngle() {
+  const t = 1 - Math.pow(1 - player.guardRaise, 2); // ease-out: fast start, settles into guard
+  return GUARD_REST_ANGLE + (GUARD_ANGLE - GUARD_REST_ANGLE) * t;
+}
+
+function drawSlugcat(p) {
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  const bob = p.onGround ? Math.sin(perfNow / 160) * 2 : 0;
+  ctx.translate(0, bob);
+
+  const flicker = p.invuln > 0 && Math.floor(perfNow / 60) % 2 === 0;
+  ctx.globalAlpha = flicker ? 0.35 : 1;
+  ctx.scale(p.facing, 1);
+
+  // ---------- Slugcat skin — chunky pixel-block art (ported from the
+  // procedural sprite prototype), driven by real game state instead of the
+  // prototype's button-triggered anim names. Same palette as spec:
+  // pale mint body, dark outline, solid black eyes. ----------
+  const BODY = '#A8F0E0';
+  const OUTLINE = '#102028';
+  const EYE = '#000000';
+  const px = (bx, by, w, h, color) => { ctx.fillStyle = color; ctx.fillRect(bx, by, w, h); };
+  // Rounded-rect version for the fluffier, plusher parts (body/head/ears/tail).
+  const pxr = (bx, by, w, h, color, r) => {
+    ctx.fillStyle = color;
+    const rad = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    if (ctx.roundRect) { ctx.roundRect(bx, by, w, h, rad); }
+    else {
+      ctx.moveTo(bx + rad, by);
+      ctx.arcTo(bx + w, by, bx + w, by + h, rad);
+      ctx.arcTo(bx + w, by + h, bx, by + h, rad);
+      ctx.arcTo(bx, by + h, bx, by, rad);
+      ctx.arcTo(bx, by, bx + w, by, rad);
+    }
+    ctx.closePath();
+    ctx.fill();
+  };
+
+  // Upright bipedal stance — hip, torso, head
+  const hipY = -14, shoulderY = -34, headY = -46;
+  const headCX = 5;
+  const moving = p.onGround && Math.abs(p.vx) > 0.3;
+  const airborne = !p.onGround;
+
+  // Chunky 4-frame walk cycle (matches the prototype's floor(tick/8)%4 gait)
+  // instead of a continuous sine — low frame-count movement reads more "pixel art."
+  const walkFrame = moving ? Math.floor(p.walkPhase * 1.3) % 4 : 0;
+  const legOffset = moving ? (walkFrame % 2 === 0 ? 3 : -3) : 0;
+  const idleBob = (!moving && !airborne) ? Math.round(Math.sin(perfNow / 300)) : 0;
+  const jumpBob = airborne ? -3 : 0;
+  const bodyY = idleBob + jumpBob;
+  const tailDroop = airborne ? 4 : 0; // arcs downward mid-air, per spec
+
+  ctx.lineCap = 'butt'; ctx.lineJoin = 'miter';
+
+  // Tail — bigger and rounder, chunky-fluffy, dragging near the ground.
+  pxr(-16, hipY + 4 + bodyY + tailDroop, 15, 9, OUTLINE, 5);
+  pxr(-15, hipY + 5 + bodyY + tailDroop, 13, 7, BODY, 4);
+
+  // Main body block — rounded corners and a bit bigger, plusher silhouette.
+  pxr(-9, shoulderY - 2 + bodyY, 22, hipY - shoulderY + 14, OUTLINE, 8);
+  pxr(-8, shoulderY - 1 + bodyY, 20, hipY - shoulderY + 12, BODY, 7);
+
+  // Ears — rounder, slightly puffier
+  pxr(headCX - 8, headY - 17 + bodyY, 5, 10, OUTLINE, 3);
+  pxr(headCX - 7, headY - 16 + bodyY, 3, 7, BODY, 2);
+  pxr(headCX + 3, headY - 17 + bodyY, 5, 10, OUTLINE, 3);
+  pxr(headCX + 4, headY - 16 + bodyY, 3, 7, BODY, 2);
+
+  // Head block — rounded into more of a plush ball than a sharp square.
+  pxr(headCX - 10, headY - 10 + bodyY, 20, 20, OUTLINE, 9);
+  pxr(headCX - 9, headY - 9 + bodyY, 18, 18, BODY, 8);
+
+  // Eyes + nostril — stay sharp small details against the soft silhouette
+  px(headCX - 3, headY - 2 + bodyY, 3, 4, EYE);
+  px(headCX + 4, headY - 2 + bodyY, 3, 4, EYE);
+  px(headCX + 10, headY + 3 + bodyY, 1.5, 1.5, EYE);
+
+  // Feet — small rounded blocks, chunky alternating gait while walking
+  if (moving) {
+    pxr(-5 + legOffset, hipY + 8 + bodyY, 5, 6, OUTLINE, 2);
+    pxr(8 - legOffset, hipY + 8 + bodyY, 5, 6, OUTLINE, 2);
+  } else if (airborne) {
+    pxr(-2, hipY + 4, 4, 4, OUTLINE, 2);
+    pxr(6, hipY + 4, 4, 4, OUTLINE, 2);
+  } else {
+    pxr(-5, hipY + 8, 5, 6, OUTLINE, 2);
+    pxr(8, hipY + 8, 5, 6, OUTLINE, 2);
+  }
+
+  // Reset defaults for the sword-arm section below, which assumes these.
+  ctx.strokeStyle = '#d7e2ec'; ctx.fillStyle = '#0e1620'; ctx.lineWidth = 4;
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+
+  // Sword arm — pivots at shoulder. Guard takes priority: raising it is a
+  // reverse-swing motion (rest -> guard), not a separate line snapped on top.
+  const isGuardPose = p.guardRaise > 0.001;
+  let armAngle;
+  if (isGuardPose) {
+    armAngle = currentGuardArmAngle();
+  } else if (p.charging) {
+    const pct = Math.min(p.chargeTime / CHARGE_MAX, 1);
+    armAngle = -1.9 - pct * 0.5; // wind up further back as charge builds
+  } else if (p.attackTimer > 0) {
+    const pct = 1 - (p.attackTimer / 7); // 0 -> 1 across the swing
+    armAngle = -1.4 + pct * 2.6; // sweeps from raised to forward
+  } else {
+    armAngle = -0.5;
+  }
+  const armLen = 20;
+  const handX = 6 + Math.cos(armAngle) * armLen;
+  const handY = shoulderY + Math.sin(armAngle) * armLen;
+
+  // Off-arm — normally a static back arm, but braces onto the blade during
+  // guard (both hands on the hilt) so the pose reads unmistakably as a block
+  // rather than a slightly-tilted rest stance.
+  if (isGuardPose) {
+    const braceX = 6 + Math.cos(armAngle) * armLen * 0.6;
+    const braceY = shoulderY + Math.sin(armAngle) * armLen * 0.6;
+    ctx.beginPath(); ctx.moveTo(-4, shoulderY + 6); ctx.lineTo(braceX, braceY); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.moveTo(2, shoulderY); ctx.lineTo(-8, shoulderY + 12); ctx.stroke();
+  }
+
+  ctx.beginPath(); ctx.moveTo(6, shoulderY); ctx.lineTo(handX, handY); ctx.stroke();
+
+  // Blade — a proper tapered sword shape (wide blade + point, crossguard,
+  // grip) instead of a single line. Fixed length always; only rotation
+  // conveys the swing/guard, no stretching.
+  const bladeLen = 44;
+  const isParry = isGuardPose && p.blocking && p.blockTimer < PARRY_WINDOW && p.guardRaise >= 1;
+  let bladeStart = '#9a9fac', bladeEnd = '#f2f6fb', bladeHalfWidth = p.attackTimer > 0 ? 3.6 : 2.8;
+  if (isGuardPose) {
+    bladeStart = isParry ? 'rgba(235,222,150,1)' : 'rgba(150,190,220,0.9)';
+    bladeEnd = isParry ? 'rgba(252,242,195,1)' : 'rgba(195,218,238,0.9)';
+    bladeHalfWidth = isParry ? 4 : 3.2;
+  }
+  const dirX = Math.cos(armAngle), dirY = Math.sin(armAngle);
+  const perpX = -dirY, perpY = dirX;
+  const tipTaper = 12;
+  const bladePt = (t, side) => ({ x: handX + dirX * t + perpX * bladeHalfWidth * side, y: handY + dirY * t + perpY * bladeHalfWidth * side });
+  const b0 = bladePt(0, 1), b1 = bladePt(bladeLen - tipTaper, 1), b2 = bladePt(bladeLen, 0),
+        b3 = bladePt(bladeLen - tipTaper, -1), b4 = bladePt(0, -1);
+
+  // Grip (behind the hand) and crossguard (perpendicular at the hand)
+  ctx.strokeStyle = '#3a2a1c'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(handX - dirX * 7, handY - dirY * 7); ctx.lineTo(handX, handY); ctx.stroke();
+  ctx.strokeStyle = isGuardPose ? bladeStart : '#7a7f88'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(handX + perpX * 7, handY + perpY * 7); ctx.lineTo(handX - perpX * 7, handY - perpY * 7); ctx.stroke();
+
+  // Tapered blade polygon
+  const bladeGrad = ctx.createLinearGradient(b0.x, b0.y, b2.x, b2.y);
+  bladeGrad.addColorStop(0, bladeStart);
+  bladeGrad.addColorStop(1, bladeEnd);
+  ctx.fillStyle = bladeGrad;
+  ctx.strokeStyle = 'rgba(20,20,25,0.55)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(b0.x, b0.y); ctx.lineTo(b1.x, b1.y); ctx.lineTo(b2.x, b2.y); ctx.lineTo(b3.x, b3.y); ctx.lineTo(b4.x, b4.y);
+  ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  // Center fuller line for a bit of metallic detail
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(handX + dirX * 3, handY + dirY * 3);
+  ctx.lineTo(handX + dirX * (bladeLen - tipTaper), handY + dirY * (bladeLen - tipTaper));
+  ctx.stroke();
+  ctx.strokeStyle = '#d7e2ec'; ctx.lineWidth = 4;
+
+  // Swing trail arc while actively attacking
+  if (p.attackTimer > 0) {
+    const pct = p.attackTimer / 7;
+    ctx.strokeStyle = `rgba(225,238,248,${0.15 + (1-pct)*0.5})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(6, shoulderY, armLen + bladeLen*0.7, -1.6, -1.6 + (1-pct)*2.6);
+    ctx.stroke();
+    ctx.strokeStyle = '#d7e2ec'; ctx.lineWidth = 4;
+  }
+
+  // Dash trail
+  if (p.isDashing) {
+    ctx.strokeStyle = 'rgba(150,190,220,0.3)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.ellipse(-16, hipY, 14, 18, 0, 0, Math.PI*2); ctx.stroke();
+    ctx.strokeStyle = '#d7e2ec'; ctx.lineWidth = 4;
+  }
+
+  ctx.restore();
+}
+
+// ---------- Boss: The Warden (stick-figure knight) ----------
+const boss = {
+  x: W - 220, y: GROUND_Y, w: 30, h: 100,
+  hp: 0, maxHp: 260,
+  phase: 1,
+  state: 'idle', stateTimer: 0, attackType: null,
+  slamWarning: null, projectiles: [],
+  hitFlash: 0,
+  crackSeed: [],
+  facing: -1,
+  spawnedGhostThresholds: [],
+  vx: 0,
+  walkPhase: 0,
+  stagger: 0, maxStagger: 100, staggerTimer: 0,
+  retreatTimer: 0, comboChainCount: 0
+};
+const BOSS_REACH = 85; // matches the fixed visual blade's actual reach
+const BOSS_MOVE_SPEED = 2.2; // slowed down — ghost speed is untouched, this is boss-only
+const BOSS_ACCEL = 0.12;
+const BOSS_ATTACK_MIN_RANGE = 70;
+const BOSS_ATTACK_MAX_RANGE = 210;
+const BOSS_MAX_COMBO_CHAINS = 1; // slowed down — one chained swipe max, not two
+
+function resetBoss() {
+  boss.hp = boss.maxHp;
+  boss.phase = 1;
+  boss.state = 'idle';
+  boss.stateTimer = 55; // slowed down — gives the player a moment to read the arena first
+  boss.projectiles = [];
+  boss.slamWarning = null;
+  boss.hitFlash = 0;
+  boss.spawnedGhostThresholds = [];
+  boss.stagger = 0; boss.staggerTimer = 0; boss.retreatTimer = 0; boss.comboChainCount = 0;
+  boss.crackSeed = Array.from({length: 12}, () => ({
+    x: (Math.random() - 0.5) * 24,
+    y: -50 - Math.random() * 40,
+    len: 8 + Math.random() * 14,
+    ang: Math.random() * Math.PI * 2,
+    threshold: Math.random()
+  }));
+}
+
+function drawFighter(entity, opts) {
+  // Pixel-block knight renderer (ported from the Knight Boss prototype),
+  // shared by the real boss and its ghost echoes via the ghost palette.
+  const { x, y, facing, phase, hitFlash, ghostAlpha, attackAngleOverride, isTelegraph, walkPhase, moving } = opts;
+  const isGhost = ghostAlpha !== undefined;
+  const pal = isGhost ? {
+    armor: 'rgba(160,255,255,0.7)', armorHighlight: '#FFFFFF', trim: '#80FFFF',
+    cape: 'rgba(200,240,255,0.3)', visor: '#FFFFFF', blade: '#B0FFFF', aura: 'rgba(0,255,255,0.25)',
+    sash: 'rgba(220,255,255,0.6)', plume: 'rgba(255,255,255,0.75)'
+  } : {
+    armor: phase === 2 ? '#503038' : '#404050', armorHighlight: phase === 2 ? '#C08890' : '#A0A0B0',
+    trim: '#806030', cape: phase === 2 ? '#601010' : '#302838', visor: phase === 2 ? '#FF2000' : '#FF4000',
+    blade: '#707080', aura: null,
+    sash: phase === 2 ? '#c03020' : '#902020', plume: phase === 2 ? '#ff6020' : '#c02020'
+  };
+  const px = (bx, by, w, h, color) => { ctx.fillStyle = color; ctx.fillRect(bx, by, w, h); };
+  const pxr = (bx, by, w, h, color, r) => {
+    ctx.fillStyle = color;
+    const rad = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    if (ctx.roundRect) { ctx.roundRect(bx, by, w, h, rad); }
+    else {
+      ctx.moveTo(bx + rad, by);
+      ctx.arcTo(bx + w, by, bx + w, by + h, rad);
+      ctx.arcTo(bx + w, by + h, bx, by + h, rad);
+      ctx.arcTo(bx, by + h, bx, by, rad);
+      ctx.arcTo(bx, by, bx + w, by, rad);
+    }
+    ctx.closePath();
+    ctx.fill();
+  };
+
+  ctx.save();
+  ctx.translate(x, y);
+  const bob = opts.noBob ? 0 : Math.sin(perfNow / 260 + (opts.bobOffset || 0)) * 3;
+  ctx.translate(0, bob);
+  ctx.scale(facing, 1);
+  if (isGhost) ctx.globalAlpha = ghostAlpha;
+
+  const flash = hitFlash > 0;
+  const armorColor = flash ? '#ffffff' : pal.armor;
+  const highlightColor = flash ? '#ffffff' : pal.armorHighlight;
+
+  const hipY = -46, shoulderY = -78, headY = -92;
+
+  // Ghost aura glow
+  if (isGhost && pal.aura) {
+    ctx.fillStyle = pal.aura;
+    ctx.beginPath(); ctx.arc(0, shoulderY + 8, 42, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Smooth continuous walk cycle — legs ease back and forth with a sine wave
+  // instead of snapping between fixed step positions.
+  const stepPhase = walkPhase || 0;
+  const legAmplitude = moving ? 4 : 0;
+  const leftLegOffset = Math.sin(stepPhase) * legAmplitude;
+  const rightLegOffset = Math.sin(stepPhase + Math.PI) * legAmplitude;
+  const headBobStep = moving ? Math.abs(Math.sin(stepPhase)) * 1.4 : 0;
+  const capeSway = Math.sin(perfNow / 130) * 3;
+
+  // Cape (drawn first so it sits behind the body)
+  px(-19 + capeSway, shoulderY + 4 + headBobStep, 15, 42, pal.cape);
+  px(-23 + capeSway * 1.2, shoulderY + 18 + headBobStep, 11, 32, pal.cape);
+
+  // Legs + knee guards + boot trim
+  const leftLegX = -9 + leftLegOffset;
+  const rightLegX = 3 + rightLegOffset;
+  px(leftLegX, hipY, 8, -hipY, armorColor);
+  px(rightLegX, hipY, 8, -hipY, armorColor);
+  px(leftLegX - 1, hipY + 20, 10, 4, pal.trim);
+  px(rightLegX - 1, hipY + 20, 10, 4, pal.trim);
+  px(leftLegX - 2, -4, 10, 4, pal.trim);
+  px(rightLegX - 2, -4, 10, 4, pal.trim);
+
+  // Heater shield on the off-hand side — breaks up the flat silhouette and
+  // gives the character depth even when standing still.
+  ctx.save();
+  ctx.translate(-15, shoulderY + 22 + headBobStep);
+  ctx.fillStyle = pal.trim;
+  ctx.beginPath();
+  ctx.moveTo(-7, -11); ctx.quadraticCurveTo(-9, -15, 0, -15); ctx.quadraticCurveTo(9, -15, 7, -11);
+  ctx.lineTo(6.5, 4); ctx.quadraticCurveTo(4, 15, 0, 19); ctx.quadraticCurveTo(-4, 15, -6.5, 4);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = highlightColor;
+  ctx.beginPath();
+  ctx.moveTo(-5, -9); ctx.quadraticCurveTo(-6.5, -12, 0, -12); ctx.quadraticCurveTo(6.5, -12, 5, -9);
+  ctx.lineTo(4.5, 3); ctx.quadraticCurveTo(3, 12, 0, 15.5); ctx.quadraticCurveTo(-3, 12, -4.5, 3);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = pal.visor;
+  ctx.fillRect(-1.6, -10, 3.2, 21);
+  ctx.fillRect(-5.5, -1, 11, 3);
+  ctx.restore();
+
+  // Torso / breastplate — rounded corners instead of a flat box
+  pxr(-12, shoulderY + headBobStep, 24, hipY - shoulderY + 4, armorColor, 4);
+  pxr(-8, shoulderY + 3 + headBobStep, 16, hipY - shoulderY - 4, highlightColor, 3);
+  px(-12, shoulderY + headBobStep, 24, 4, pal.trim);
+  px(-12, hipY - 2 + headBobStep, 24, 4, pal.trim);
+
+  // Waist tassets / sash — flared fabric strips over the upper legs, the
+  // biggest single fix for the "boxy torso-to-legs" transition.
+  px(-11, hipY - 2 + headBobStep, 5, 16, pal.sash);
+  px(-4, hipY + headBobStep, 5, 18, pal.sash);
+  px(3, hipY + headBobStep, 5, 18, pal.sash);
+  px(9, hipY - 2 + headBobStep, 5, 16, pal.sash);
+
+  // Pauldron (shoulder guard) — rounded, plus a smaller far-side sliver for depth
+  pxr(-9, shoulderY - 5 + headBobStep, 9, 10, pal.trim, 3);
+  pxr(-17, shoulderY - 3 + headBobStep, 13, 13, pal.trim, 4);
+  pxr(-15, shoulderY - 1 + headBobStep, 9, 9, highlightColor, 3);
+
+  // Helmet + T-visor — rounded, with a small chin guard
+  pxr(-10, headY + headBobStep, 20, 17, armorColor, 5);
+  pxr(-6, headY + 2 + headBobStep, 12, 12, highlightColor, 4);
+  px(-4, headY + 7 + headBobStep, 12, 3, pal.visor);
+  px(2, headY + 7 + headBobStep, 3, 6, pal.visor);
+  px(-4, headY + 15 + headBobStep, 12, 3, armorColor);
+
+  // Plume — flowing crest on top of the helmet, swaying independently of the cape
+  const plumeSway = Math.sin(perfNow / 150) * 4;
+  ctx.fillStyle = pal.plume;
+  ctx.beginPath();
+  ctx.moveTo(-3, headY + 1 + headBobStep);
+  ctx.quadraticCurveTo(-15 + plumeSway, headY - 9 + headBobStep, -10 + plumeSway * 1.3, headY - 23 + headBobStep);
+  ctx.quadraticCurveTo(-5 + plumeSway, headY - 14 + headBobStep, 3, headY - 1 + headBobStep);
+  ctx.closePath();
+  ctx.fill();
+
+  // Damage cracks (real boss only)
+  if (!isGhost) {
+    const dmgFrac = 1 - boss.hp / boss.maxHp;
+    boss.crackSeed.forEach(c => {
+      if (dmgFrac > c.threshold * 0.9) {
+        const a = Math.min(1, (dmgFrac - c.threshold * 0.9) * 4);
+        ctx.save();
+        ctx.globalAlpha = a;
+        ctx.fillStyle = 'rgba(10,8,10,0.85)';
+        ctx.fillRect(c.x, c.y, 2.5, 2.5);
+        ctx.restore();
+      }
+    });
+  }
+
+  // Arm + gauntlet + greatsword — all rotate together as one rigid group
+  // around the shoulder, driven by the same attack-angle functions as
+  // before. Normalized so the resting angle (-2.3 rad) hangs straight down.
+  const rawAngle = attackAngleOverride !== undefined ? attackAngleOverride : -2.3;
+  const swingAngle = rawAngle + 2.3;
+  ctx.save();
+  ctx.translate(6, shoulderY + 6 + headBobStep);
+  ctx.rotate(swingAngle);
+  px(-3, 0, 6, 12, armorColor);              // upper arm
+  pxr(-4, 10, 8, 8, armorColor, 2);          // gauntlet (hand)
+  pxr(-3, 11, 6, 5, highlightColor, 1.5);    // gauntlet knuckle highlight
+  px(-2, 16, 4, 8, pal.trim);                // hilt
+  px(-6, 24, 12, 4, pal.trim);               // guard
+  px(-2, 28, 6, 40, pal.blade);              // blade
+  px(0, 28, 2, 38, highlightColor);          // edge highlight
+  ctx.restore();
+
+  ctx.restore();
+
+  // Telegraph ring (real boss only)
+  if (isTelegraph && !isGhost) {
+    ctx.strokeStyle = `rgba(230,150,150,${0.3 + 0.4 * Math.sin(perfNow/70)})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(x - facing*50, y - 60, BOSS_REACH, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+function bossArmAngleForAttack() {
+  if (boss.state === 'staggered') return 0.4; // sword drooped, arm slack
+  if (boss.state === 'telegraph' && boss.attackType === 'swipe') {
+    return -2.3 - 0.25 * Math.sin(perfNow/80);
+  }
+  if (boss.state === 'attacking' && boss.attackType === 'swipe') {
+    const pct = 1 - (boss.stateTimer / 20);
+    return -2.3 + pct * 2.8;
+  }
+  return -2.3;
+}
+
+function drawBoss(b) {
+  const staggered = b.state === 'staggered';
+  drawFighter(b, {
+    x: b.x, y: b.y, facing: b.facing,
+    phase: staggered ? 1 : b.phase,
+    hitFlash: b.hitFlash,
+    attackAngleOverride: bossArmAngleForAttack(),
+    isAttacking: b.state === 'attacking' && b.attackType === 'swipe',
+    isTelegraph: b.state === 'telegraph' && b.attackType === 'swipe',
+    walkPhase: b.walkPhase, moving: Math.abs(b.vx) > 0.15,
+    bobOffset: 0, noBob: staggered
+  });
+
+  if (staggered) {
+    ctx.save();
+    ctx.globalAlpha = 0.5 + 0.5 * Math.sin(perfNow / 90);
+    ctx.fillStyle = '#e8d060';
+    ctx.font = 'bold 13px Georgia';
+    ctx.textAlign = 'center';
+    ctx.fillText('STAGGERED — PUNISH NOW', b.x, b.y - 130);
+    ctx.restore();
+    ctx.textAlign = 'left';
+  }
+
+  if (b.slamWarning) {
+    const sw = b.slamWarning;
+    ctx.strokeStyle = `rgba(230,180,120,${0.4 + 0.4 * Math.sin(perfNow/60)})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(sw.x, GROUND_Y - 4, sw.radius, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  b.projectiles.forEach(pr => {
+    ctx.fillStyle = 'rgba(200,140,160,0.85)';
+    ctx.beginPath(); ctx.arc(pr.x, pr.y, 8, 0, Math.PI * 2); ctx.fill();
+  });
+}
+
+// ---------- Ghost clones ----------
+let ghosts = [];
+const GHOST_SPEED = 2.1; // hyper-aggressive: closes in fast, doesn't just drift
+const GHOST_SEPARATION_RADIUS = 42; // ghosts push apart from each other within this range, so they fan out instead of stacking
+const GHOST_ATTACK_RANGE = 58;
+const GHOST_REACH = 46;
+const GHOST_TELEGRAPH_FRAMES = 12;
+const GHOST_ATTACK_FRAMES = 14;
+const GHOST_ATTACK_COOLDOWN_MIN = 30; // relentless: attacks again almost immediately
+const GHOST_ATTACK_COOLDOWN_MAX = 55;
+const GHOST_DAMAGE = 8;
+
+function spawnGhost() {
+  const side = Math.random() > 0.5 ? 1 : -1;
+  const gx = Math.max(80, Math.min(W - 80, player.x + side * (140 + Math.random()*80)));
+  ghosts.push({
+    x: gx, y: GROUND_Y, facing: gx < boss.x ? 1 : -1,
+    hp: 3, hitFlash: 0, spawnGrow: 0, bobOffset: Math.random()*10,
+    walkPhase: 0, vx: 0,
+    attackState: 'idle', attackTimer: 0, attackCooldown: 20, hasHit: false
+  });
+  addShake(5);
+}
+function ghostAttackHitbox(g) {
+  const x = g.facing === -1 ? g.x - GHOST_REACH : g.x;
+  return { x, y: g.y - 90, w: GHOST_REACH, h: 30 };
+}
+function resolveGhostAttack(g) {
+  if (player.invuln > 0) return;
+  const gAtk = ghostAttackHitbox(g);
+  if (player.blocking) {
+    const blockBox = playerBlockHitbox();
+    if (rectsOverlap(gAtk.x, gAtk.y, gAtk.w, gAtk.h, blockBox.x, blockBox.y, blockBox.w, blockBox.h)) {
+      if (player.blockTimer < PARRY_WINDOW) {
+        spawnClash(blockBox.x + blockBox.w/2, blockBox.y);
+        player.invuln = 14;
+        g.attackState = 'idle'; g.attackCooldown = 90; // a real parry buys real breathing room
+        return;
+      }
+      dealDamageToPlayer(Math.round(GHOST_DAMAGE * 0.25));
+      return;
+    }
+  }
+  const bodyBox = playerBodyHitbox();
+  if (rectsOverlap(gAtk.x, gAtk.y, gAtk.w, gAtk.h, bodyBox.x, bodyBox.y, bodyBox.w, bodyBox.h)) {
+    dealDamageToPlayer(GHOST_DAMAGE);
+  }
+}
+function ghostArmAngleForAttack(g) {
+  if (g.attackState === 'telegraph') return -2.3 - 0.25 * Math.sin(perfNow/80);
+  if (g.attackState === 'attacking') {
+    const pct = 1 - (g.attackTimer / GHOST_ATTACK_FRAMES);
+    return -2.3 + pct * 2.6;
+  }
+  return -2.3;
+}
+function updateGhosts(dt) {
+  ghosts.forEach(g => {
+    g.spawnGrow = Math.min(1, g.spawnGrow + 0.08 * dt);
+    if (g.hitFlash > 0) g.hitFlash -= dt;
+    if (g.attackCooldown > 0) g.attackCooldown -= dt;
+    g.facing = player.x < g.x ? -1 : 1;
+
+    // A fully-formed echo is a real, aggressive threat — it closes distance
+    // fast and swings on its own, matching the title screen's warning that
+    // the knight "calls on echoes of himself." It roots itself to attack,
+    // same as the boss, rather than swinging mid-stride.
+    if (g.spawnGrow < 1) return;
+    const dx = player.x - g.x;
+    const dist = Math.abs(dx);
+
+    if (g.attackState === 'idle') {
+      if (dist < GHOST_ATTACK_RANGE && g.attackCooldown <= 0) {
+        g.attackState = 'telegraph';
+        g.attackTimer = GHOST_TELEGRAPH_FRAMES;
+        g.vx = 0;
+        g.hasHit = false;
+      } else {
+        let desiredVx = dist > 15 ? Math.sign(dx) * GHOST_SPEED : 0;
+
+        // Separation: push away from any other ghost that's too close, so a
+        // pack fans out around the player instead of stacking on one spot.
+        let sep = 0;
+        ghosts.forEach(other => {
+          if (other === g) return;
+          const sx = g.x - other.x;
+          const sad = Math.abs(sx);
+          if (sad > 0.001 && sad < GHOST_SEPARATION_RADIUS) {
+            sep += Math.sign(sx) * (GHOST_SEPARATION_RADIUS - sad) / GHOST_SEPARATION_RADIUS;
+          }
+        });
+        desiredVx += sep * GHOST_SPEED;
+
+        g.vx += (desiredVx - g.vx) * Math.min(1, 0.08 * dt);
+        g.x += g.vx * dt;
+        g.x = Math.max(50, Math.min(W - 50, g.x));
+        g.walkPhase += Math.abs(g.vx) * 0.11 * dt;
+      }
+    } else if (g.attackState === 'telegraph') {
+      g.attackTimer -= dt;
+      if (g.attackTimer <= 0) { g.attackState = 'attacking'; g.attackTimer = GHOST_ATTACK_FRAMES; }
+    } else if (g.attackState === 'attacking') {
+      g.attackTimer -= dt;
+      if (!g.hasHit && g.attackTimer <= GHOST_ATTACK_FRAMES * 0.5) {
+        g.hasHit = true;
+        resolveGhostAttack(g);
+      }
+      if (g.attackTimer <= 0) {
+        g.attackState = 'idle';
+        g.attackCooldown = GHOST_ATTACK_COOLDOWN_MIN + Math.random() * (GHOST_ATTACK_COOLDOWN_MAX - GHOST_ATTACK_COOLDOWN_MIN);
+      }
+    }
+  });
+  ghosts = ghosts.filter(g => g.hp > 0); // permanent until killed — no despawn timer
+}
+function drawGhosts() {
+  ghosts.forEach(g => {
+    drawFighter(g, {
+      x: g.x, y: g.y, facing: g.facing, phase: 1, hitFlash: g.hitFlash,
+      ghostAlpha: 0.55 * g.spawnGrow, bobOffset: g.bobOffset,
+      attackAngleOverride: ghostArmAngleForAttack(g),
+      isAttacking: g.attackState === 'attacking', isTelegraph: false,
+      walkPhase: g.walkPhase, moving: Math.abs(g.vx) > 0.1
+    });
+  });
+}
+
+// ---------- Clash sparks ----------
+let sparks = [];
+function spawnClash(x, y) {
+  addShake(9);
+  for (let i = 0; i < 14; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const spd = 2 + Math.random() * 4;
+    sparks.push({ x, y, vx: Math.cos(ang)*spd, vy: Math.sin(ang)*spd, life: 20 + Math.random()*10 });
+  }
+}
+function updateSparks(dt) {
+  sparks.forEach(s => { s.x += s.vx * dt; s.y += s.vy * dt; s.vy += 0.15 * dt; s.life -= dt; });
+  sparks = sparks.filter(s => s.life > 0);
+}
+function drawSparks() {
+  sparks.forEach(s => {
+    ctx.fillStyle = `rgba(240,230,190,${Math.min(1, s.life/20)})`;
+    ctx.beginPath(); ctx.arc(s.x, s.y, 2, 0, Math.PI * 2); ctx.fill();
+  });
+}
+
+// ---------- Input ----------
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.code] = true; });
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+let mouseAttackHeld = false;
+canvas.addEventListener('mousedown', e => {
+  if (e.button === 0) mouseAttackHeld = true;
+  if (e.button === 2) { rightMouseHeld = true; }
+});
+window.addEventListener('mouseup', e => {
+  if (e.button === 0) mouseAttackHeld = false;
+  if (e.button === 2) rightMouseHeld = false;
+});
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+let rightMouseHeld = false;
+
+let gameState = 'title';
+let perfNow = 0;
+let globalHitStop = 0;
+let lastFrameTime = null;
+let fightStartTime = 0;
+let fightElapsedMs = 0;
+
+function formatTime(ms) {
+  const totalSec = ms / 1000;
+  const m = Math.floor(totalSec / 60);
+  const s = (totalSec % 60).toFixed(2).padStart(5, '0');
+  return `${m}:${s}`;
+}
+
+function showOverlay(id) {
+  ['titleScreen', 'loseScreen', 'winScreen'].forEach(o => document.getElementById(o).classList.add('hidden'));
+  if (id) document.getElementById(id).classList.remove('hidden');
+}
+
+function startFight() {
+  player.x = 150; player.y = GROUND_Y; player.vx = 0; player.vy = 0;
+  player.hp = player.maxHp; player.invuln = 0; player.isDashing = false;
+  player.dashCooldown = 0; player.attackCooldown = 0; player.attackTimer = 0;
+  player.charging = false; player.chargeTime = 0; player.blocking = false; player.blockTimer = 0;
+  player.guardRaise = 0;
+  player.recoveryTimer = 0;
+  player.stamina = STAMINA_MAX; player.staminaRegenTimer = 0;
+  player.potions = 3; player.alive = true;
+  resetBoss();
+  ghosts = []; sparks = [];
+  gameState = 'playing';
+  fightStartTime = performance.now();
+  fightElapsedMs = 0;
+  showOverlay(null);
+}
+
+document.getElementById('startBtn').addEventListener('click', startFight);
+document.getElementById('retryBtn').addEventListener('click', startFight);
+document.getElementById('winRetryBtn').addEventListener('click', startFight);
+
+function loseFight() {
+  gameState = 'lose';
+  const n = bumpAttempts();
+  document.getElementById('loseSubtitle').textContent = `Attempt ${n}. The depths remember.`;
+  showOverlay('loseScreen');
+}
+function winFight() {
+  gameState = 'win';
+  const n = bumpAttempts();
+  document.getElementById('winAttemptsTag').textContent = `Victory on attempt ${n} — cleared in ${formatTime(fightElapsedMs)}.`;
+  document.getElementById('mintStatusTag').textContent = '';
+  showOverlay('winScreen');
+}
+
+const GRAVITY = 0.7;
+const MOVE_SPEED = 4.2;
+const JUMP_FORCE = -13;
+const DASH_SPEED = 11;
+const DASH_DURATION = 12;
+const DASH_COOLDOWN_MAX = 45;
+const ATTACK_COOLDOWN_MAX = 12; // faster — much quicker follow-up swings
+const DAMAGE_MIN = 8, DAMAGE_MAX = 24;
+
+function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh) {
+  return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+function playerAttackHitbox() {
+  // Blade-only reach — a thin band at blade height, not a tall body-covering box.
+  const x = player.facing === 1 ? player.x + 10 : player.x - 10 - REACH;
+  return { x, y: player.y - 42, w: REACH, h: 22 };
+}
+function playerBodyHitbox() {
+  return { x: player.x - 16, y: player.y - 62, w: 32, h: 62 };
+}
+function playerBlockHitbox() {
+  // Covers the sword from shoulder to wherever its tip currently is mid-raise —
+  // matches drawSlugcat exactly, so reach grows as the reverse-swing completes.
+  // Block a hair too late and the blade simply hasn't gotten there yet.
+  const shoulderY = -34;
+  const guardAngle = currentGuardArmAngle();
+  const guardLen = 64 * player.guardRaise;
+  const shoulderWorldX = player.x + player.facing * 6;
+  const shoulderWorldY = player.y + shoulderY;
+  const tipWorldX = shoulderWorldX + player.facing * Math.cos(guardAngle) * guardLen;
+  const tipWorldY = shoulderWorldY + Math.sin(guardAngle) * guardLen;
+  const minX = Math.min(shoulderWorldX, tipWorldX) - 6;
+  const maxX = Math.max(shoulderWorldX, tipWorldX) + 6;
+  const minY = Math.min(shoulderWorldY, tipWorldY) - 6;
+  const maxY = Math.max(shoulderWorldY, tipWorldY) + 6;
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+function bossAttackHitbox() {
+  if (boss.attackType === 'swipe' && boss.state === 'attacking') {
+    // Blade-only reach band, roughly chest height — not the full torso.
+    const x = boss.facing === -1 ? boss.x - BOSS_REACH : boss.x;
+    return { x, y: boss.y - 92, w: BOSS_REACH, h: 34 };
+  }
+  return null;
+}
+
+function updatePlayer(dt) {
+  if (!player.alive) return;
+
+  if (player.recoveryTimer > 0) player.recoveryTimer -= dt;
+  const inRecovery = player.recoveryTimer > 0;
+
+  if (!player.isDashing && !player.blocking && !inRecovery) {
+    if (keys['ArrowLeft'] || keys['KeyA']) { player.targetVx = -MOVE_SPEED; player.facing = -1; }
+    else if (keys['ArrowRight'] || keys['KeyD']) { player.targetVx = MOVE_SPEED; player.facing = 1; }
+    else player.targetVx = 0;
+    player.vx += (player.targetVx - player.vx) * Math.min(1, PLAYER_ACCEL * dt);
+  } else if (player.blocking || inRecovery) {
+    // Follow-through on a swing briefly roots you — real weight, real commitment.
+    player.vx *= Math.pow(0.7, dt); player.targetVx = 0;
+  }
+
+  let staminaSpent = false;
+
+  if (keys['Space'] && player.onGround && !player.blocking && !inRecovery && player.stamina >= STAMINA_JUMP_COST) {
+    player.vy = JUMP_FORCE; player.onGround = false;
+    player.stamina -= STAMINA_JUMP_COST; staminaSpent = true;
+  }
+
+  if (player.dashCooldown > 0) player.dashCooldown -= dt;
+  if (keys['KeyS'] && player.dashCooldown <= 0 && !player.isDashing && !player.blocking && player.stamina >= STAMINA_DASH_COST) {
+    player.isDashing = true; player.dashTimer = DASH_DURATION;
+    player.invuln = DASH_DURATION + 4; player.dashCooldown = DASH_COOLDOWN_MAX;
+    player.stamina -= STAMINA_DASH_COST; staminaSpent = true;
+  }
+  if (player.isDashing) {
+    player.vx = player.facing * DASH_SPEED;
+    player.dashTimer -= dt;
+    if (player.dashTimer <= 0) player.isDashing = false;
+  }
+
+  if ((keys['KeyW'] || rightMouseHeld) && !player.isDashing && player.onGround) {
+    if (!player.blocking) { player.blocking = true; player.blockTimer = 0; }
+    player.blockTimer++;
+  } else { player.blocking = false; }
+
+  // Reverse-swing into guard: the blade physically travels from rest to
+  // guard angle rather than snapping there, and its reach follows along —
+  // block too late and the sword genuinely hasn't arrived yet.
+  if (player.blocking) {
+    player.guardRaise = Math.min(1, player.guardRaise + dt / GUARD_RAISE_FRAMES);
+  } else {
+    player.guardRaise = Math.max(0, player.guardRaise - dt / GUARD_LOWER_FRAMES);
+  }
+
+  if (player.attackCooldown > 0) player.attackCooldown -= dt;
+  if (player.attackTimer > 0) player.attackTimer -= dt;
+  if (mouseAttackHeld && player.attackCooldown <= 0 && !player.blocking && player.stamina >= STAMINA_ATTACK_COST) {
+    player.charging = true;
+    player.chargeTime = Math.min(CHARGE_MAX, player.chargeTime + dt);
+  } else if (player.charging) {
+    player.charging = false;
+    player.attackCooldown = ATTACK_COOLDOWN_MAX;
+    player.attackTimer = 7; // faster — quicker swing animation
+    player.stamina = Math.max(0, player.stamina - STAMINA_ATTACK_COST); staminaSpent = true;
+    const chargePct = player.chargeTime / CHARGE_MAX;
+    // Recovery scales with how hard you swung — a full heavy swing commits
+    // you to real follow-through, not a free instant reset.
+    player.recoveryTimer = 3 + chargePct * 6;
+    const dmg = Math.round(DAMAGE_MIN + (DAMAGE_MAX - DAMAGE_MIN) * chargePct);
+
+    const hb = playerAttackHitbox();
+    const bossBox = { x: boss.x - 20, y: boss.y - 100, w: 40, h: 100 };
+    const bossAtk = bossAttackHitbox();
+    let hitSomething = false;
+
+    if (boss.state !== 'staggered' && bossAtk && rectsOverlap(hb.x, hb.y, hb.w, hb.h, bossAtk.x, bossAtk.y, bossAtk.w, bossAtk.h)) {
+      spawnClash((player.x + boss.x)/2, player.y - 60);
+      globalHitStop = 8;
+      boss.state = 'cooldown'; boss.stateTimer = 40;
+      player.vx = -player.facing * 6; player.invuln = 20;
+      addStagger(chargePct > 0.7 ? 16 : 9); // clashing blade-to-blade rocks him too
+      hitSomething = true;
+    }
+    if (!hitSomething && rectsOverlap(hb.x, hb.y, hb.w, hb.h, bossBox.x, bossBox.y, bossBox.w, bossBox.h)) {
+      // A staggered boss is wide open — real bonus damage for punishing it.
+      const finalDmg = boss.state === 'staggered' ? Math.round(dmg * 1.6) : dmg;
+      boss.hp = Math.max(0, boss.hp - finalDmg);
+      boss.hitFlash = 8;
+      if (chargePct > 0.8) { addShake(6); globalHitStop = 4; }
+      hitSomething = true;
+      checkGhostSpawns();
+    }
+    // Ghosts are checked unconditionally — a single swing can hit the boss
+    // AND any ghosts overlapping the blade at the same time, not just
+    // whichever target got checked first. Matters most when they clump.
+    ghosts.forEach(g => {
+      const gBox = { x: g.x - 16, y: g.y - 100, w: 32, h: 100 };
+      if (rectsOverlap(hb.x, hb.y, hb.w, hb.h, gBox.x, gBox.y, gBox.w, gBox.h)) {
+        g.hp -= 1; g.hitFlash = 8;
+        if (g.hp <= 0) addShake(4);
+      }
+    });
+    player.chargeTime = 0;
+  }
+
+  player.vy += GRAVITY * dt;
+  player.y += player.vy * dt;
+  if (player.y >= GROUND_Y) { player.y = GROUND_Y; player.vy = 0; player.onGround = true; }
+  player.x += player.vx * dt;
+  player.x = Math.max(30, Math.min(W - 30, player.x));
+  if (player.invuln > 0) player.invuln -= dt;
+  if (player.onGround) player.walkPhase += Math.abs(player.vx) * 0.09 * dt;
+
+  if (keys['KeyZ'] && player.potions > 0 && !player._potionKeyLatch) {
+    player.potions--;
+    player.hp = Math.min(player.maxHp, player.hp + player.maxHp * 0.5);
+    player._potionKeyLatch = true;
+  }
+  if (!keys['KeyZ']) player._potionKeyLatch = false;
+
+  // Stamina regen: a short pause after the last spend, then it climbs back.
+  if (staminaSpent) {
+    player.staminaRegenTimer = STAMINA_REGEN_DELAY;
+  } else if (player.staminaRegenTimer > 0) {
+    player.staminaRegenTimer -= dt;
+  } else if (player.stamina < STAMINA_MAX) {
+    player.stamina = Math.min(STAMINA_MAX, player.stamina + STAMINA_REGEN_RATE * dt);
+  }
+
+  if (boss.hp <= 0) { winFight(); return; }
+  if (player.hp <= 0) { player.alive = false; loseFight(); }
+}
+
+function checkGhostSpawns() {
+  const frac = boss.hp / boss.maxHp;
+  [0.75, 0.5, 0.25].forEach(threshold => {
+    if (frac <= threshold && !boss.spawnedGhostThresholds.includes(threshold)) {
+      boss.spawnedGhostThresholds.push(threshold);
+      spawnGhost();
+    }
+  });
+}
+
+function updateBossMovement(dt) {
+  if (boss.state === 'staggered') { boss.vx *= Math.pow(0.8, dt); boss.x += boss.vx * dt; return; }
+
+  const dx = player.x - boss.x;
+  const dist = Math.abs(dx);
+  boss.facing = dx < 0 ? -1 : 1;
+
+  // Same aggression model as the ghosts: close in relentlessly, never back off,
+  // just stop pressing once genuinely close enough to swing.
+  const desiredVx = dist > BOSS_ATTACK_MIN_RANGE ? Math.sign(dx) * BOSS_MOVE_SPEED : 0;
+  boss.vx += (desiredVx - boss.vx) * Math.min(1, BOSS_ACCEL * dt);
+  boss.x += boss.vx * dt;
+  boss.x = Math.max(60, Math.min(W - 60, boss.x));
+  boss.walkPhase += Math.abs(boss.vx) * 0.11 * dt;
+}
+
+function addStagger(amount) {
+  if (boss.state === 'staggered' || boss.hp <= 0) return;
+  boss.stagger = Math.min(boss.maxStagger, boss.stagger + amount);
+  if (boss.stagger >= boss.maxStagger) {
+    boss.state = 'staggered';
+    boss.staggerTimer = 100;
+    boss.stagger = 0;
+    boss.slamWarning = null;
+    boss.projectiles = [];
+    addShake(10);
+  }
+}
+
+function updateBoss(dt) {
+  if (boss.hitFlash > 0) boss.hitFlash -= dt;
+  if (boss.retreatTimer > 0) boss.retreatTimer -= dt;
+  if (boss.hp <= 0) return;
+  boss.phase = boss.hp < boss.maxHp * 0.4 ? 2 : 1;
+
+  updateBossMovement(dt);
+
+  // Posture slowly bleeds off if it's not being actively built — one old
+  // block/parry shouldn't linger forever toward a future stagger.
+  if (boss.state !== 'staggered' && boss.stagger > 0) {
+    boss.stagger = Math.max(0, boss.stagger - 0.12 * dt);
+  }
+
+  if (boss.state === 'staggered') {
+    boss.staggerTimer -= dt;
+    if (boss.staggerTimer <= 0) { boss.state = 'idle'; boss.stateTimer = 6; }
+    return;
+  }
+
+  boss.stateTimer -= dt;
+  if (boss.stateTimer > 0) {
+    if (boss.state === 'attacking') runAttack();
+    return;
+  }
+  if (boss.state === 'idle') {
+    const dist = Math.abs(player.x - boss.x);
+    // Only commit to an attack once genuinely in range for it; otherwise keep closing distance.
+    if (dist > BOSS_ATTACK_MAX_RANGE) { boss.stateTimer = 4; return; }
+    boss.attackType = dist > 160
+      ? 'spit'
+      : ['swipe', 'swipe', 'slam'][Math.floor(Math.random() * 3)];
+    boss.state = 'telegraph';
+    boss.comboChainCount = 0;
+    boss.stateTimer = boss.phase === 2 ? 26 : 40; // slowed down — clearer, readable windup
+  } else if (boss.state === 'telegraph') {
+    boss.state = 'attacking';
+    boss.stateTimer = boss.attackType === 'slam' ? 30 : 20;
+    if (boss.attackType === 'slam') boss.slamWarning = { x: player.x, radius: 10 };
+  } else if (boss.state === 'attacking') {
+    boss.slamWarning = null;
+    // Chains occasionally in phase 2, but far less relentlessly than before.
+    if (boss.attackType === 'swipe' && boss.comboChainCount < BOSS_MAX_COMBO_CHAINS
+        && boss.phase === 2 && Math.random() < 0.35 && Math.abs(player.x - boss.x) < BOSS_ATTACK_MAX_RANGE) {
+      boss.comboChainCount++;
+      boss.state = 'telegraph';
+      boss.stateTimer = 18;
+    } else {
+      boss.state = 'cooldown';
+      boss.stateTimer = boss.phase === 2 ? 16 : 26; // real breathing room between engagements
+    }
+  } else if (boss.state === 'cooldown') {
+    boss.state = 'idle'; boss.stateTimer = 10;
+  }
+}
+
+function dealDamageToPlayer(dmg) {
+  if (player.invuln > 0) return;
+  player.hp = Math.max(0, player.hp - dmg);
+  player.invuln = 28;
+  addShake(4);
+}
+
+function applyDamageToPlayer(dmg) {
+  // Used only for non-blade attacks (spit, slam) — blocking still helps here,
+  // since dodging a projectile/AOE with your blade doesn't need real contact.
+  // Requires the guard to have mostly arrived — pressing block a frame too
+  // late shouldn't retroactively protect you before the sword gets there.
+  if (player.invuln > 0) return;
+  if (player.blocking && player.guardRaise > 0.6) {
+    if (player.blockTimer < PARRY_WINDOW) {
+      spawnClash(player.x + player.facing*30, player.y - 60);
+      globalHitStop = 8;
+      boss.state = 'cooldown'; boss.stateTimer = 45;
+      player.invuln = 20;
+      addStagger(18);
+      return;
+    }
+    dmg = Math.round(dmg * 0.25);
+    addStagger(6);
+  }
+  dealDamageToPlayer(dmg);
+}
+
+function resolveSwordClash(dmg) {
+  // Real blade-vs-blade collision: blocking only helps if your raised blade
+  // actually overlaps the incoming swing — holding the key alone isn't enough.
+  if (player.invuln > 0) return;
+  const bossAtk = bossAttackHitbox();
+  if (!bossAtk) return;
+
+  if (player.blocking) {
+    const blockBox = playerBlockHitbox();
+    if (rectsOverlap(bossAtk.x, bossAtk.y, bossAtk.w, bossAtk.h, blockBox.x, blockBox.y, blockBox.w, blockBox.h)) {
+      if (player.blockTimer < PARRY_WINDOW) {
+        spawnClash(blockBox.x + blockBox.w/2, blockBox.y);
+        globalHitStop = 8;
+        boss.state = 'cooldown'; boss.stateTimer = 45;
+        player.invuln = 20;
+        addStagger(22); // a real parry is the biggest posture hit in the fight
+        return;
+      }
+      dealDamageToPlayer(Math.round(dmg * 0.25));
+      addStagger(7);
+      return;
+    }
+  }
+  // Block didn't intercept the blade — check if the swing actually reached the body.
+  const bodyBox = playerBodyHitbox();
+  if (rectsOverlap(bossAtk.x, bossAtk.y, bossAtk.w, bossAtk.h, bodyBox.x, bodyBox.y, bodyBox.w, bodyBox.h)) {
+    dealDamageToPlayer(dmg);
+  }
+}
+
+function runAttack() {
+  if (boss.attackType === 'swipe') {
+    resolveSwordClash(14);
+  } else if (boss.attackType === 'spit') {
+    if (boss.projectiles.length === 0 && boss.stateTimer === 19) {
+      boss.projectiles.push({ x: boss.x + boss.facing*40, y: boss.y - 70, vx: boss.facing * (6 + boss.phase) });
+    }
+  } else if (boss.attackType === 'slam') {
+    if (boss.slamWarning) boss.slamWarning.radius = 90;
+    if (boss.stateTimer === 1) {
+      const dist = Math.abs(player.x - boss.x);
+      if (dist < 90) applyDamageToPlayer(20);
+    }
+  }
+  boss.projectiles.forEach(pr => { pr.x += pr.vx; });
+  boss.projectiles = boss.projectiles.filter(pr => pr.x > -20);
+  boss.projectiles.forEach(pr => {
+    if (rectsOverlap(pr.x - 8, pr.y - 8, 16, 16, player.x - player.w/2, player.y - player.h, player.w, player.h)) {
+      applyDamageToPlayer(10);
+      pr.x = -999;
+    }
+  });
+}
+
+function drawHUD() {
+  ctx.fillStyle = 'rgba(20,26,32,0.8)';
+  ctx.fillRect(24, 24, 220, 16);
+  ctx.fillStyle = '#7fb8d8';
+  ctx.fillRect(24, 24, 220 * (player.hp / player.maxHp), 16);
+  ctx.strokeStyle = 'rgba(150,180,200,0.4)';
+  ctx.strokeRect(24, 24, 220, 16);
+  ctx.fillStyle = '#9fb4c4';
+  ctx.font = '11px Georgia';
+  ctx.fillText('SLUGCAT', 24, 20);
+
+  // Stamina bar — governs attacks, jumps, and dashes. Turns dim red when too
+  // low to swing, so running dry reads as a clear signal, not a mystery.
+  const staminaPct = player.stamina / STAMINA_MAX;
+  ctx.fillStyle = 'rgba(20,26,32,0.8)';
+  ctx.fillRect(24, 44, 220, 8);
+  ctx.fillStyle = player.stamina < STAMINA_ATTACK_COST ? '#a86a6a' : '#8fcf9a';
+  ctx.fillRect(24, 44, 220 * staminaPct, 8);
+  ctx.strokeStyle = 'rgba(150,180,200,0.3)';
+  ctx.strokeRect(24, 44, 220, 8);
+
+  for (let i = 0; i < 3; i++) {
+    ctx.fillStyle = i < player.potions ? 'rgba(150,220,160,0.85)' : 'rgba(80,90,90,0.4)';
+    ctx.beginPath(); ctx.arc(30 + i * 20, 68, 6, 0, Math.PI * 2); ctx.fill();
+  }
+  if (player.charging) {
+    const pct = player.chargeTime / CHARGE_MAX;
+    ctx.fillStyle = 'rgba(20,26,32,0.8)'; ctx.fillRect(24, 82, 120, 8);
+    ctx.fillStyle = pct > 0.8 ? '#e8d060' : '#7fb8d8';
+    ctx.fillRect(24, 82, 120 * pct, 8);
+  }
+
+  const bw = 340;
+  ctx.fillStyle = 'rgba(20,26,32,0.8)';
+  ctx.fillRect(W - bw - 24, 24, bw, 16);
+  ctx.fillStyle = boss.phase === 2 ? '#c98a8a' : '#a87c9c';
+  ctx.fillRect(W - bw - 24, 24, bw * (boss.hp / boss.maxHp), 16);
+  ctx.strokeStyle = 'rgba(180,140,160,0.4)';
+  ctx.strokeRect(W - bw - 24, 24, bw, 16);
+  ctx.fillStyle = '#c4a8b4';
+  ctx.textAlign = 'right';
+  const label = boss.state === 'staggered' ? 'THE WARDEN — STAGGERED' : (boss.phase === 2 ? 'THE WARDEN — ENRAGED' : 'THE WARDEN');
+  ctx.fillText(label, W - 24, 20);
+  ctx.textAlign = 'left';
+
+  // Posture/stagger bar — this is what parries and blocks actually build.
+  ctx.fillStyle = 'rgba(20,26,32,0.7)';
+  ctx.fillRect(W - bw - 24, 44, bw, 6);
+  const staggerPct = boss.state === 'staggered' ? 1 : boss.stagger / boss.maxStagger;
+  ctx.fillStyle = boss.state === 'staggered' ? '#e8d060' : '#e0c060';
+  ctx.fillRect(W - bw - 24, 44, bw * staggerPct, 6);
+
+  ctx.fillStyle = 'rgba(180,196,210,0.75)';
+  ctx.font = '13px Georgia';
+  ctx.textAlign = 'center';
+  ctx.fillText(formatTime(fightElapsedMs), W/2, 20);
+  ctx.textAlign = 'left';
+
+  if (ghosts.length) {
+    ctx.fillStyle = 'rgba(150,190,220,0.7)';
+    ctx.textAlign = 'center';
+    ctx.fillText('An echo stirs...', W/2, 40);
+    ctx.textAlign = 'left';
+  }
+}
+
+function loop(t) {
+  perfNow = t;
+  if (lastFrameTime === null) lastFrameTime = t;
+  let dt = (t - lastFrameTime) / (1000 / 60); // frames-equivalent elapsed, ~1.0 at 60fps
+  dt = Math.max(0.1, Math.min(dt, 3)); // clamp so tab-switches/lag spikes don't teleport things
+  lastFrameTime = t;
+
+  if (gameState === 'playing') {
+    fightElapsedMs = performance.now() - fightStartTime;
+  }
+
+  if (globalHitStop > 0) {
+    globalHitStop -= dt;
+  } else if (gameState === 'playing') {
+    updatePlayer(dt);
+    updateBoss(dt);
+    updateGhosts(dt);
+  }
+  updateSparks(dt);
+  if (shakeAmount > 0.3) shakeAmount *= Math.pow(0.85, dt); else shakeAmount = 0;
+
+  ctx.save();
+  if (shakeAmount > 0.3) ctx.translate((Math.random()-0.5)*shakeAmount, (Math.random()-0.5)*shakeAmount);
+  drawBackground(t / 16);
+  if (gameState === 'playing' || gameState === 'lose' || gameState === 'win') {
+    drawBoss(boss);
+    drawGhosts();
+    drawSlugcat(player);
+    drawSparks();
+  }
+  if (gameState === 'playing') drawHUD();
+  ctx.restore();
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// ============================================================
+// MONAD MINT STUB
+// ============================================================
+const CONTRACT_ADDRESS = null;
+const CONTRACT_ABI = null;
+
+async function mintOnChain(attempts, timeMs) {
+  const statusTag = document.getElementById('mintStatusTag');
+  if (!CONTRACT_ADDRESS || !window.ethereum) {
+    statusTag.textContent = 'Simulating mint... (no contract wired up yet)';
+    await new Promise(r => setTimeout(r, 900));
+    const fakeHash = '0x' + Array.from({length: 8}, () => Math.floor(Math.random()*16).toString(16)).join('');
+    statusTag.textContent = `✓ Simulated mint — tx ${fakeHash}... (attempts: ${attempts}, time: ${formatTime(timeMs)})`;
+    return;
+  }
+  /*
+  try {
+    statusTag.textContent = 'Connecting wallet...';
+    await window.ethereum.request({ method: 'eth_requestAccounts' });
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const signer = await provider.getSigner();
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
+    statusTag.textContent = 'Minting on Monad testnet...';
+    const tx = await contract.recordVictory(attempts, Math.round(timeMs));
+    await tx.wait();
+    statusTag.textContent = `✓ Minted on-chain — tx ${tx.hash.slice(0,10)}...`;
+  } catch (err) {
+    statusTag.textContent = `Mint failed: ${err.message || err}`;
+  }
+  */
+}
+document.getElementById('mintBtn').addEventListener('click', () => {
+  mintOnChain(getAttempts(), fightElapsedMs);
+});
+</script>
+</body>
+</html>
